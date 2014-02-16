@@ -110,6 +110,59 @@ const char *get_classname(zend_uint handle)
     return class_name;
 }
 
+/**
+ * Return the content of a property of an object handle
+ *
+ * @param zend_uint object handle
+ * @param char *property
+ * @param int *property_len
+ *
+ * @return char * property content
+ */
+char * get_property_as_string(zend_uint handle, char *property, int property_len)
+{
+    zend_objects_store *objects = &EG(objects_store);
+    zend_object *object;
+    zend_class_entry *class_entry;
+
+    char *property_content;
+
+    property_content = "";
+
+    if (objects->object_buckets[handle].valid) {
+        zval *z_obj;
+        zval *z_property;
+        zval z_property_copy;
+
+        int use_copy = 0;
+        struct _store_object *obj = &objects->object_buckets[handle].bucket.obj;
+
+        object =  (zend_object * ) obj->object;
+
+        class_entry = object->ce;
+
+        MAKE_STD_ZVAL(z_obj);
+        Z_TYPE_P(z_obj) = IS_OBJECT;
+        Z_OBJ_HANDLE_P(z_obj) = handle;
+
+        Z_OBJ_HT_P(z_obj) = obj->handlers;
+
+        z_property = zend_read_property(class_entry, z_obj, property, property_len, 1 TSRMLS_CC);
+
+        zend_make_printable_zval(z_property, &z_property_copy, &use_copy);
+
+        if (use_copy) {
+            property_content = Z_STRVAL(z_property_copy);
+            zval_dtor(&z_property_copy);
+        } else {
+            property_content = Z_STRVAL_P(z_property);
+        }
+        zval_dtor(z_obj);
+    }
+
+    return property_content;
+}
+
 
 PHP_FUNCTION(meminfo_structs_size)
 {
@@ -134,7 +187,10 @@ PHP_FUNCTION(meminfo_objects_list)
     zval *zval_stream;
     php_stream *stream;
 
-    if (zend_parse_parameters(ZEND_NUM_ARGS() TSRMLS_CC, "r", &zval_stream) == FAILURE) {
+    char *property;
+    int property_len = 0;
+
+    if (zend_parse_parameters(ZEND_NUM_ARGS() TSRMLS_CC, "r|s", &zval_stream, &property, &property_len) == FAILURE) {
         return;
     }
 
@@ -149,17 +205,24 @@ PHP_FUNCTION(meminfo_objects_list)
     zend_uint current_objects = 0;
     zend_object * object;
     zend_class_entry * class_entry;
+    char * property_content;
 
     for (i = 1; i < objects->top ; i++) {
         if (objects->object_buckets[i].valid) {
-            stream_printf(stream, "  - Class %s, handle %d\n", get_classname(i), i);
+            stream_printf(stream, "  - Class %s, handle %d", get_classname(i), i);
+
+            if (property_len > 0) {
+                property_content = get_property_as_string(i, property, property_len);
+                stream_printf(stream, ", property %s:%s\n", property, property_content);
+            } else {
+                stream_printf(stream, "\n");
+            }
 
             current_objects++;
         }
      }
 
     stream_printf(stream, "Total object buckets: %d. Current objects: %d.\n", total_objects_buckets, current_objects);
-
 }
 
 PHP_FUNCTION(meminfo_gc_roots_list)
