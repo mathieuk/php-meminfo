@@ -19,6 +19,7 @@ const zend_function_entry meminfo_functions[] = {
     PHP_FE(meminfo_objects_list, NULL)
     PHP_FE(meminfo_gc_roots_list, NULL)
     PHP_FE(meminfo_symbol_table, NULL)
+    PHP_FE(meminfo_dependency_list, NULL)
     {NULL, NULL, NULL}
 };
 
@@ -43,72 +44,6 @@ zend_module_entry meminfo_module_entry = {
 ZEND_GET_MODULE(meminfo)
 #endif
 
-//TODO: use gettype directly ? Possible ?
-char* get_type_label(zval* z) {
-    switch (Z_TYPE_P(z)) {
-        case IS_NULL:
-            return "NULL";
-            break;
-
-        case IS_BOOL:
-            return "boolean";
-            break;
-
-        case IS_LONG:
-            return "integer";
-            break;
-
-        case IS_DOUBLE:
-            return "double";
-            break;
-    
-        case IS_STRING:
-            return "string";
-            break;
-    
-        case IS_ARRAY:
-            return "array";
-            break;
-
-        case IS_OBJECT:
-            return "object";
-            break;
-
-        case IS_RESOURCE:
-            return "resource";
-            break;
-
-        default:
-            return "Unknown type";
-    }
-}
-
-/**
- * Return the class associated to the provided object handle
- *
- * @param zend_uint object handle
- *
- * @return char * class name
- */
-const char *get_classname(zend_uint handle)
-{
-    zend_objects_store *objects = &EG(objects_store);
-    zend_object *object;
-    zend_class_entry *class_entry;
-    const char* class_name;
-
-    class_name = "";
-
-    if (objects->object_buckets[handle].valid) {
-        struct _store_object *obj = &objects->object_buckets[handle].bucket.obj;
-        object =  (zend_object * ) obj->object;
-
-        class_entry = object->ce;
-        class_name = class_entry->name;
-    }
-
-    return class_name;
-}
 
 
 PHP_FUNCTION(meminfo_structs_size)
@@ -211,8 +146,206 @@ PHP_FUNCTION(meminfo_symbol_table)
     main_symbol_table = EG(symbol_table);
 
     php_stream_printf(stream, "Nb elements in Symbol Table: %d\n",main_symbol_table.nNumOfElements);
-
-    
 }
+
+PHP_FUNCTION(meminfo_dependency_list)
+{
+    zval *zv;
+    zval *zval_stream;
+    php_stream *stream;
+    HashTable *visited_items;
+    
+    if (zend_parse_parameters(ZEND_NUM_ARGS() TSRMLS_CC, "rz", &zval_stream, &zv) == FAILURE) {
+        return;
+    }
+
+    php_stream_from_zval(stream, &zval_stream);
+
+    ALLOC_HASHTABLE(visited_items);
+    zend_hash_init(visited_items, 1000000, NULL, NULL, 0);
+
+    browse_zvals(stream, zv, visited_items);
+
+    zend_hash_destroy(visited_items);
+    FREE_HASHTABLE(visited_items);
+}
+
+
+int visit_item(char * item_label, HashTable *visited_items)
+{
+    int found = 0;
+    int isset = 1;
+
+
+    if (zend_hash_exists(visited_items, item_label, strlen(item_label))) {
+        found = 1;
+    } else {
+        zend_hash_update(visited_items, item_label, strlen(item_label), &isset, sizeof(int), NULL);
+    }
+
+    return found;
+}
+
+static void browse_hash(php_stream * stream, char *zval_label, HashTable *ht, zend_bool is_object, HashTable *visited_items TSRMLS_DC)
+{
+    zval **tmp;
+    char *string_key;
+    HashPosition iterator;
+    ulong num_key;
+    uint str_len;
+    int i;
+
+    zend_hash_internal_pointer_reset_ex(ht, &iterator);
+
+    while (zend_hash_get_current_data_ex(ht, (void **) &tmp, &iterator) == SUCCESS) {
+        switch (zend_hash_get_current_key_ex(ht, &string_key, &str_len, &num_key, 0, &iterator)) {
+            case HASH_KEY_IS_STRING:
+                if (is_object) {
+                    const char *prop_name, *class_name;
+                    int mangled = zend_unmangle_property_name(string_key, str_len - 1, &class_name, &prop_name);
+
+                    php_stream_printf(stream, "%s =%s> ", zval_label, prop_name);
+                } else {
+                    php_stream_printf(stream, "%s =%s> ", zval_label, string_key);
+                }
+                break;
+            case HASH_KEY_IS_LONG:
+                {
+                    char key[25];
+                    snprintf(key, sizeof(key), "%ld", num_key);
+                    php_stream_printf(stream, "%s =%s> ", zval_label, key);
+                }
+                break;
+        }
+        browse_zvals(stream, *tmp, visited_items);
+        zend_hash_move_forward_ex(ht, &iterator);
+    }
+}
+
+void browse_zvals(php_stream * stream, zval * zv, HashTable *visited_items)
+{
+    char zval_label[100];
+    switch (Z_TYPE_P(zv)) {
+        case IS_ARRAY:
+            snprintf(zval_label, 100, "Array %p", Z_ARRVAL_P(zv));
+            php_stream_printf(stream, "%s\n", zval_label);
+            if (!visit_item(zval_label, visited_items)) {
+                browse_hash(stream, zval_label, Z_ARRVAL_P(zv), 0, visited_items);
+            }
+            break;
+        case IS_OBJECT:
+            {
+                HashTable *properties;
+                const char *class_name = NULL;
+                zend_uint clen;
+                int is_temp;
+
+
+                if (Z_OBJ_HANDLER_P(zv, get_class_name)) {
+                    Z_OBJ_HANDLER_P(zv, get_class_name)(zv, &class_name, &clen, 0 TSRMLS_CC);
+                }
+                if (class_name) {
+                    snprintf(zval_label, 100, "Object #%d (%s)", zv->value.obj.handle, class_name);
+                } else {
+                    snprintf(zval_label, 100, "Object #%d (*unknow class*)", zv->value.obj.handle);
+                }
+                php_stream_printf(stream, "%s\n", zval_label);
+                if (class_name) {
+                    efree((char*)class_name);
+                }
+
+                if ((properties = Z_OBJDEBUG_P(zv, is_temp)) == NULL) {
+                    break;
+                }
+                if (!visit_item(zval_label, visited_items)) {
+                    browse_hash(stream, zval_label, properties, 1, visited_items);
+                }
+                if (is_temp) {
+                    zend_hash_destroy(properties);
+                    efree(properties);
+                }
+                break;
+            }
+        default:
+            php_stream_printf(stream, "%s %p\n", get_type_label(zv), zv);
+            break;
+        }
+}
+
+//TODO: use gettype directly ? Possible ?
+char* get_type_label(zval* z)
+{
+    switch (Z_TYPE_P(z)) {
+        case IS_NULL:
+            return "NULL";
+            break;
+
+        case IS_BOOL:
+            return "boolean";
+            break;
+
+        case IS_LONG:
+            return "integer";
+            break;
+
+        case IS_DOUBLE:
+            return "double";
+            break;
+    
+        case IS_STRING:
+            return "string";
+            break;
+    
+        case IS_ARRAY:
+            return "array";
+            break;
+
+        case IS_OBJECT:
+            return "object";
+            break;
+
+        case IS_RESOURCE:
+            return "resource";
+            break;
+
+        default:
+            return "Unknown type";
+    }
+}
+
+/**
+ * Return the class associated to the provided object handle
+ *
+ * @param zend_uint object handle
+ *
+ * @return char * class name
+ */
+const char *get_classname(zend_uint handle)
+{
+    zend_objects_store *objects = &EG(objects_store);
+    zend_object *object;
+    zend_class_entry *class_entry;
+    const char* class_name;
+
+    class_name = "";
+
+    if (objects->object_buckets[handle].valid) {
+        struct _store_object *obj = &objects->object_buckets[handle].bucket.obj;
+        object =  (zend_object * ) obj->object;
+
+        class_entry = object->ce;
+        class_name = class_entry->name;
+    }
+
+    return class_name;
+}
+
+
+
+
+
+
+
+
 
 
