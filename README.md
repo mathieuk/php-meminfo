@@ -11,7 +11,7 @@ For now, PHP Meminfo provides a list of live objects in memory with their class 
 
 Compatibility
 -------------
- 
+
 Compiled and tested on:
 
  - PHP 5.4.4 (Debian 7)

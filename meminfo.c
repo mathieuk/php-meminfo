@@ -44,8 +44,6 @@ zend_module_entry meminfo_module_entry = {
 ZEND_GET_MODULE(meminfo)
 #endif
 
-
-
 PHP_FUNCTION(meminfo_structs_size)
 {
     zval *zval_stream;
@@ -204,16 +202,16 @@ static void browse_hash(php_stream * stream, char *zval_label, HashTable *ht, ze
                     const char *prop_name, *class_name;
                     int mangled = zend_unmangle_property_name(string_key, str_len - 1, &class_name, &prop_name);
 
-                    php_stream_printf(stream, "%s =%s> ", zval_label, prop_name);
+                    php_stream_printf(stream, "%s,%s,", zval_label, prop_name);
                 } else {
-                    php_stream_printf(stream, "%s =%s> ", zval_label, string_key);
+                    php_stream_printf(stream, "%s,%s,", zval_label, string_key);
                 }
                 break;
             case HASH_KEY_IS_LONG:
                 {
                     char key[25];
                     snprintf(key, sizeof(key), "%ld", num_key);
-                    php_stream_printf(stream, "%s =%s> ", zval_label, key);
+                    php_stream_printf(stream, "%s,%s,", zval_label, key);
                 }
                 break;
         }
@@ -227,7 +225,7 @@ void browse_zvals(php_stream * stream, zval * zv, HashTable *visited_items)
     char zval_label[100];
     switch (Z_TYPE_P(zv)) {
         case IS_ARRAY:
-            snprintf(zval_label, 100, "Array %p", Z_ARRVAL_P(zv));
+            snprintf(zval_label, 100, "Array (%p)", Z_ARRVAL_P(zv));
             php_stream_printf(stream, "%s\n", zval_label);
             if (!visit_item(zval_label, visited_items)) {
                 browse_hash(stream, zval_label, Z_ARRVAL_P(zv), 0, visited_items);
@@ -245,9 +243,9 @@ void browse_zvals(php_stream * stream, zval * zv, HashTable *visited_items)
                     Z_OBJ_HANDLER_P(zv, get_class_name)(zv, &class_name, &clen, 0 TSRMLS_CC);
                 }
                 if (class_name) {
-                    snprintf(zval_label, 100, "Object #%d (%s)", zv->value.obj.handle, class_name);
+                    snprintf(zval_label, 100, "Object %s (#%d)", class_name, zv->value.obj.handle);
                 } else {
-                    snprintf(zval_label, 100, "Object #%d (*unknow class*)", zv->value.obj.handle);
+                    snprintf(zval_label, 100, "Object *unknow class* (#%d)", zv->value.obj.handle);
                 }
                 php_stream_printf(stream, "%s\n", zval_label);
                 if (class_name) {
@@ -267,7 +265,7 @@ void browse_zvals(php_stream * stream, zval * zv, HashTable *visited_items)
                 break;
             }
         default:
-            php_stream_printf(stream, "%s %p\n", get_type_label(zv), zv);
+            php_stream_printf(stream, "%s (%p)\n", get_type_label(zv), zv);
             break;
         }
 }

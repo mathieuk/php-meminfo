@@ -45,7 +45,7 @@ meminfo_objects_list(fopen('php://stdout', 'w'));
 
 function myFunction() {
     $myDate = new \DateTime();
-    
+
     echo "\n* Objects list in function call with inside DateTime object\n";
     meminfo_objects_list(fopen('php://stdout', 'w'));
 }
