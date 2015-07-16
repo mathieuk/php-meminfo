@@ -13,12 +13,17 @@ PHP_FUNCTION(meminfo_objects_summary);
 PHP_FUNCTION(meminfo_gc_roots_list);
 PHP_FUNCTION(meminfo_symbol_table);
 PHP_FUNCTION(meminfo_dependency_list);
+PHP_FUNCTION(meminfo_dependency_list_summary);
 
 char* get_type_label(zval* z);
 const char *get_classname(zend_uint handle);
-static void browse_hash(php_stream * stream, char * zval_label, HashTable *ht, zend_bool is_object, HashTable *visited_items TSRMLS_DC);
+static void browse_hash(php_stream * stream, const char * zval_label, HashTable *ht, zend_bool is_object, HashTable *visited_items TSRMLS_DC);
 void browse_zvals(php_stream * stream, zval * zv, HashTable *visited_items);
-int visit_item(char * item_label, HashTable * visited_items);
+int visit_item(const char * item_label, HashTable * visited_items);
+void inc_links_summary(const char * origin_class_name, const char * target_class_name, HashTable *links_summary);
+void browse_zvals_summary(zval * zv, HashTable *visited_items, HashTable *links_summary, const char* origin_class_name);
+static void browse_hash_summary(HashTable *ht, const char * class_name, HashTable *links_summary, HashTable *visited_items TSRMLS_DC);
+
 
 static int instances_count_compare(const void *a, const void *b TSRMLS_DC);
 

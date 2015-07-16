@@ -21,6 +21,7 @@ const zend_function_entry meminfo_functions[] = {
     PHP_FE(meminfo_gc_roots_list, NULL)
     PHP_FE(meminfo_symbol_table, NULL)
     PHP_FE(meminfo_dependency_list, NULL)
+    PHP_FE(meminfo_dependency_list_summary, NULL)
     {NULL, NULL, NULL}
 };
 
@@ -261,7 +262,7 @@ PHP_FUNCTION(meminfo_dependency_list)
     php_stream_from_zval(stream, &zval_stream);
 
     ALLOC_HASHTABLE(visited_items);
-    zend_hash_init(visited_items, 1000000, NULL, NULL, 0);
+    zend_hash_init(visited_items, 1000, NULL, NULL, 0);
 
     browse_zvals(stream, zv, visited_items);
 
@@ -269,8 +270,99 @@ PHP_FUNCTION(meminfo_dependency_list)
     FREE_HASHTABLE(visited_items);
 }
 
+/**
+ * Generates a summary of links between classes.
+ *
+ * Internal dependency Format (the number is the link occurences number):
+ * [
+ *     "ClassA" : [
+ *         "ClassB" : 5,
+ *         "ClassC" : 2
+ *     ]
+ *     "ClassB" : [
+ *         "ClassC" : 6,
+ *     ]
+ * ]
+ *
+ * Note that the summary represents only Object to Object link. In case of
+ * indirect links between objects via array, the arrays are squashed and only
+ * the link is shown.
+ *
+ * @param Zval zv        Root of the dependency tree
+ * @param Zval zv_stream Stream to write summary to
+ */
+PHP_FUNCTION(meminfo_dependency_list_summary)
+{
+    zval *zv;
+    zval *zval_stream;
 
-int visit_item(char * item_label, HashTable *visited_items)
+    php_stream *stream;
+
+    HashTable *visited_items;
+    HashTable *links_summary;
+
+    HashPosition summary_pos;
+    HashPosition target_pos;
+    HashTable **target_links;
+    int **count;
+    ulong summary_index;
+    ulong target_index;
+    char *origin_class_name;
+    char *target_class_name;
+    uint origin_class_name_length;
+    uint target_class_name_length;
+    char *rootName = "_ROOT_";
+
+    char from[201];
+    char to[201];
+
+    if (zend_parse_parameters(ZEND_NUM_ARGS() TSRMLS_CC, "rz", &zval_stream, &zv) == FAILURE) {
+        return;
+    }
+
+    php_stream_from_zval(stream, &zval_stream);
+
+    ALLOC_HASHTABLE(visited_items);
+    zend_hash_init(visited_items, 1000, NULL, NULL, 0);
+
+    ALLOC_HASHTABLE(links_summary);
+    zend_hash_init(links_summary, 1000, NULL, NULL, 0);
+
+    browse_zvals_summary(zv, visited_items, links_summary, rootName);
+
+    zend_hash_destroy(visited_items);
+    FREE_HASHTABLE(visited_items);
+
+    zend_hash_internal_pointer_reset_ex(links_summary, &summary_pos);
+
+    while (zend_hash_get_current_data_ex(links_summary, (void **) &target_links, &summary_pos) == SUCCESS) {
+        zend_hash_get_current_key_ex(links_summary, &origin_class_name, &origin_class_name_length, &summary_index, 0, &summary_pos);
+
+        zend_hash_internal_pointer_reset_ex(*target_links, &target_pos);
+        while (zend_hash_get_current_data_ex(*target_links, (void **) &count, &target_pos) == SUCCESS) {
+            zend_hash_get_current_key_ex(*target_links, &target_class_name, &target_class_name_length, &target_index, 0, &target_pos);
+
+            strncpy(from, origin_class_name, origin_class_name_length);
+            strncpy(to, target_class_name, target_class_name_length);
+
+            from[origin_class_name_length] = 0;
+            to[target_class_name_length] = 0;
+
+            php_stream_printf(stream, "%s,%d,%s\n", from, *count, to);
+
+            zend_hash_move_forward_ex(*target_links, &target_pos);
+        }
+        zend_hash_destroy(*target_links);
+        FREE_HASHTABLE(*target_links);
+
+        zend_hash_move_forward_ex(links_summary, &summary_pos);
+    }
+
+    zend_hash_destroy(links_summary);
+    FREE_HASHTABLE(links_summary);
+}
+
+int visit_item(const char * item_label, HashTable *visited_items)
 {
     int found = 0;
     int isset = 1;
@@ -285,19 +377,48 @@ int visit_item(char * item_label, HashTable *visited_items)
     return found;
 }
 
-static void browse_hash(php_stream * stream, char *zval_label, HashTable *ht, zend_bool is_object, HashTable *visited_items TSRMLS_DC)
+void inc_links_summary(const char * origin_class_name, const char * target_class_name, HashTable *links_summary)
+{
+    int found = 0;
+    int inc_start = 1;
+
+    HashTable **target_links;
+
+    if (!zend_hash_exists(links_summary, origin_class_name, strlen(origin_class_name))) {
+        HashTable * new_target_links;
+
+        ALLOC_HASHTABLE(new_target_links);
+        zend_hash_init(new_target_links, 100, NULL, NULL, 0);
+
+        zend_hash_update(links_summary, origin_class_name, strlen(origin_class_name), &new_target_links, sizeof(HashTable *), NULL);
+    }
+
+    zend_hash_find(links_summary, origin_class_name, strlen(origin_class_name), (void **) &target_links);
+
+    if (zend_hash_exists(*target_links, target_class_name, strlen(target_class_name))) {
+        int* count;
+
+        zend_hash_find(*target_links, target_class_name, strlen(target_class_name), (void **) &count);
+
+        (*count)++;
+    } else {
+        zend_hash_update(*target_links, target_class_name, strlen(target_class_name), &inc_start, sizeof(int), NULL);
+    }
+}
+
+static void browse_hash(php_stream * stream, const char *zval_label, HashTable *ht, zend_bool is_object, HashTable *visited_items TSRMLS_DC)
 {
     zval **tmp;
     char *string_key;
-    HashPosition iterator;
+    HashPosition pos;
     ulong num_key;
     uint str_len;
     int i;
 
-    zend_hash_internal_pointer_reset_ex(ht, &iterator);
+    zend_hash_internal_pointer_reset_ex(ht, &pos);
 
-    while (zend_hash_get_current_data_ex(ht, (void **) &tmp, &iterator) == SUCCESS) {
-        switch (zend_hash_get_current_key_ex(ht, &string_key, &str_len, &num_key, 0, &iterator)) {
+    while (zend_hash_get_current_data_ex(ht, (void **) &tmp, &pos) == SUCCESS) {
+        switch (zend_hash_get_current_key_ex(ht, &string_key, &str_len, &num_key, 0, &pos)) {
             case HASH_KEY_IS_STRING:
                 if (is_object) {
                     const char *prop_name, *class_name;
@@ -317,13 +438,14 @@ static void browse_hash(php_stream * stream, char *zval_label, HashTable *ht, ze
                 break;
         }
         browse_zvals(stream, *tmp, visited_items);
-        zend_hash_move_forward_ex(ht, &iterator);
+        zend_hash_move_forward_ex(ht, &pos);
     }
 }
 
 void browse_zvals(php_stream * stream, zval * zv, HashTable *visited_items)
 {
-    char zval_label[100];
+    char zval_label[500];
+
     switch (Z_TYPE_P(zv)) {
         case IS_ARRAY:
             snprintf(zval_label, 100, "Array (%p)", Z_ARRVAL_P(zv));
@@ -344,14 +466,12 @@ void browse_zvals(php_stream * stream, zval * zv, HashTable *visited_items)
                     Z_OBJ_HANDLER_P(zv, get_class_name)(zv, &class_name, &clen, 0 TSRMLS_CC);
                 }
                 if (class_name) {
-                    snprintf(zval_label, 100, "Object %s (#%d)", class_name, zv->value.obj.handle);
+                    snprintf(zval_label, 499, "Object %s (#%d)", class_name, zv->value.obj.handle);
+                    efree((char*)class_name);
                 } else {
-                    snprintf(zval_label, 100, "Object *unknow class* (#%d)", zv->value.obj.handle);
+                    snprintf(zval_label, 499, "Object *unknown class* (#%d)", zv->value.obj.handle);
                 }
                 php_stream_printf(stream, "%s\n", zval_label);
-                if (class_name) {
-                    efree((char*)class_name);
-                }
 
                 if ((properties = Z_OBJDEBUG_P(zv, is_temp)) == NULL) {
                     break;
@@ -369,6 +489,77 @@ void browse_zvals(php_stream * stream, zval * zv, HashTable *visited_items)
             php_stream_printf(stream, "%s (%p)\n", get_type_label(zv), zv);
             break;
         }
+}
+
+void browse_zvals_summary(zval * zv, HashTable *visited_items, HashTable *links_summary, const char *origin_class_name)
+{
+    char class_name[501];
+    char item_key[501];
+
+    switch (Z_TYPE_P(zv)) {
+        case IS_ARRAY:
+
+            snprintf(item_key, 501, "A-%p", Z_ARRVAL_P(zv));
+
+            if (!visit_item(item_key, visited_items)) {
+                browse_hash_summary(Z_ARRVAL_P(zv), origin_class_name, links_summary, visited_items);
+            }
+            break;
+        case IS_OBJECT:
+            {
+                HashTable *properties;
+                const char *class_name = NULL;
+                zend_uint clen;
+                int is_temp;
+
+                if (Z_OBJ_HANDLER_P(zv, get_class_name)) {
+                    Z_OBJ_HANDLER_P(zv, get_class_name)(zv, &class_name, &clen, 0 TSRMLS_CC);
+                }
+
+                if (!class_name) {
+                    class_name = "*unknow class*";
+                }
+
+                inc_links_summary(origin_class_name, class_name, links_summary);
+
+                if ((properties = Z_OBJDEBUG_P(zv, is_temp)) == NULL) {
+                    break;
+                }
+
+                snprintf(item_key, 501, "O-%d",  zv->value.obj.handle);
+
+                if (!visit_item(item_key, visited_items)) {
+                    browse_hash_summary(properties, class_name, links_summary, visited_items);
+                }
+                if (is_temp) {
+                    zend_hash_destroy(properties);
+                    efree(properties);
+                }
+
+                if (class_name) {
+                    efree((char*)class_name);
+                }
+                break;
+            }
+    }
+}
+
+static void browse_hash_summary(HashTable *ht, const char *class_name, HashTable *links_summary, HashTable *visited_items TSRMLS_DC)
+{
+    zval **zval;
+    char *string_key;
+    HashPosition pos;
+    ulong num_key;
+    uint str_len;
+    int i;
+
+
+    zend_hash_internal_pointer_reset_ex(ht, &pos);
+
+    while (zend_hash_get_current_data_ex(ht, (void **) &zval, &pos) == SUCCESS) {
+        browse_zvals_summary(*zval, visited_items, links_summary, class_name);
+        zend_hash_move_forward_ex(ht, &pos);
+    }
 }
 
 //TODO: use gettype directly ? Possible ?
