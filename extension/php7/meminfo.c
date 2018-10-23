@@ -70,6 +70,7 @@ PHP_FUNCTION(meminfo_dump)
     php_stream_printf(stream TSRMLS_CC, "  \"items\": {\n");
     meminfo_browse_exec_frames(stream,  visited_items, &first_element);
     meminfo_browse_class_static_members(stream,  visited_items, &first_element);
+    meminfo_browse_object_store(stream, visited_items, &first_element);
 
     php_stream_printf(stream TSRMLS_CC, "\n    }\n");
     php_stream_printf(stream TSRMLS_CC, "}\n}\n");
@@ -171,6 +172,73 @@ void meminfo_browse_class_static_members(php_stream *stream,  HashTable *visited
 
         zend_hash_move_forward_ex(CG(class_table), &ce_pos);
     }
+}
+
+void meminfo_browse_object_store(php_stream *stream, HashTable *visited_items, int *first_element)
+{
+	zend_object **obj_ptr, **end, *obj;
+	zend_class_entry *class_entry;
+	zval *closure_used_var;
+	HashTable *closure_used_vars;
+	HashPosition cov_pos;
+	zend_string *current_varname;
+	ulong current_index;
+
+	if (EG(objects_store).top <= 1) {
+                return;
+        }
+
+        end = EG(objects_store).object_buckets + 1;
+        obj_ptr = EG(objects_store).object_buckets + EG(objects_store).top;
+
+        do {
+ 		char zval_identifier[16];
+		obj_ptr--;
+		obj = *obj_ptr;
+
+		// There might be some references to destructed objects hanging around.
+		if (!IS_OBJ_VALID(obj)) {
+			continue;
+		}
+
+       		sprintf(zval_identifier, "%p", obj);
+
+    		zval isset;
+    		zend_string * zstr_item_identifier;
+
+    		zstr_item_identifier = zend_string_init(zval_identifier, strlen(zval_identifier), 0);
+    		isset.value.lval = 1;
+
+    		if (!zend_hash_exists(visited_items, zstr_item_identifier)) {
+			php_printf("Found unseen alive object: %s #%d (%s)\n", obj->ce->name->val, obj->handle, zval_identifier);
+
+			HashTable *properties;
+			int is_temp;
+			zend_string * escaped_class_name;
+
+			properties = NULL;
+
+			escaped_class_name = meminfo_escape_for_json(ZSTR_VAL(obj->ce->name));
+
+			php_stream_printf(stream TSRMLS_CC, "} ,\n");
+			php_stream_printf(stream TSRMLS_CC, "\"%s\":	{\n", zval_identifier);
+			php_stream_printf(stream TSRMLS_CC, "        \"class\" : \"%s\",\n", ZSTR_VAL(escaped_class_name));
+
+			zend_string_release(escaped_class_name);
+			php_stream_printf(stream TSRMLS_CC, "        \"is_root\" : false,\n");
+			php_stream_printf(stream TSRMLS_CC, "        \"frame\" : \"<OBJECTS_IN_OBJECT_STORE>\",\n");
+			php_stream_printf(stream TSRMLS_CC, "        \"object_handle\" : \"%d\",\n", obj->handle);
+
+ 			php_stream_printf(stream TSRMLS_CC, "        \"type\" : \"object\",\n");
+    			php_stream_printf(stream TSRMLS_CC, "        \"size\" : \"%ld\"\n", sizeof(zend_object));
+			//meminfo_hash_dump(stream, obj->properties, 1, visited_items, first_element);
+			
+
+   		}
+ 
+		zend_string_release(zstr_item_identifier);
+
+	} while (obj_ptr != end);
 }
 
 void meminfo_browse_zvals_from_symbol_table(php_stream *stream, char* frame_label, HashTable *p_symbol_table, HashTable * visited_items, int *first_element)
